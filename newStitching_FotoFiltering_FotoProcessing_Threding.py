@@ -43,7 +43,7 @@ def process_images(source_dir, destination_dir):
     for i, filename in enumerate(sorted_files):
         timestamp = Image.open(os.path.join(destination_dir, filename))._getexif()[306]
         time_str = datetime.strptime(timestamp, '%Y:%m:%d %H:%M:%S').strftime('%Y%m%d_%H%M%S')
-        new_filename = f"{i}_{time_str}.jpg"
+        new_filename = f"{i}_{time_str}.png"
         os.rename(os.path.join(destination_dir, filename), os.path.join(destination_dir, new_filename))
 
     # Видалення метаданих з фото
@@ -74,7 +74,7 @@ def stitch_image_in_sub_directory(input_directory, output_directory):
                 print('---------------------------------')
 
                 # Розбиття списку filenames на 10 частин
-                num_parts = 15
+                num_parts = 7
                 filenames_parts = np.array_split(filenames, num_parts)
 
                 # Створення ThreadPool з 10 потоками
@@ -85,7 +85,7 @@ def stitch_image_in_sub_directory(input_directory, output_directory):
                     try:
                         logger.info('Поток %s: Початок склеювання %s', threading.get_ident(), filenames)
                         # Створіть зображення-колаж з першого зображення
-                        image_collage = cv2.imread(os.path.join(output_directory, 'temp', filenames[0]))
+                        image_collage = cv2.imread(os.path.join(output_directory, 'temp', filenames[0]), cv2.IMREAD_UNCHANGED)
 
                         # Пройдіть по решті зображень у частині
                         for filename in filenames[1:]:
@@ -96,7 +96,7 @@ def stitch_image_in_sub_directory(input_directory, output_directory):
                             image_collage = first_step(image_collage, main_image)
 
                         # Збережіть зображення-колаж
-                        save_image(output_directory, f'temp\\temp_image_stitched_{group_number:04d}.jpg', image_collage)
+                        save_image(output_directory, f'temp\\temp_image_stitched_{group_number:04d}.png', image_collage)
                         
                         logger.info('Поток %s: Завершено склеювання %s', threading.get_ident(), filenames)
 
@@ -118,9 +118,9 @@ def stitch_image_in_sub_directory(input_directory, output_directory):
                                                 cv2.imread(os.path.join(output_directory, 'temp', filename2)))
 
                         # Збережіть зображення-колаж
-                        save_image(output_directory, f'temp\\temp_image_stitched_{id1}_{id2}.jpg', image_collage)
+                        save_image(output_directory, f'temp\\temp_image_stitched_{id1}_{id2}.png', image_collage)
 
-                        new_filenames.append(f'temp_image_stitched_{id1}_{id2}.jpg')
+                        new_filenames.append(f'temp_image_stitched_{id1}_{id2}.png')
 
                         logger.info('Поток %s: Завершено склеювання пари', threading.get_ident())
 
@@ -180,60 +180,108 @@ def stitch_image_in_sub_directory(input_directory, output_directory):
                 if len(new_filenames) == 1:
                     print('---------------------------------')
                     print('Finish')
-                    final_image = cv2.imread(os.path.join(output_directory, 'temp', filenames[0]))
-                    save_image(output_directory, 'final_image_stitched.jpg', final_image)
+                    final_image = cv2.imread(os.path.join(output_directory, 'temp', new_filenames[0]))
+                    save_image(output_directory, 'final_image_stitched.png', final_image)
 
     except Exception as e:
-        print(f"An error occurred: {e}")
+        logging.exception("An error occurred during image processing: %s", e)
 
+def replace_black_with_transparent(img):
+    """
+    Замінює чорні пікселі (RGB=(0, 0, 0)) в зображенні на прозорі.
 
+    Args:
+        img (ndarray): Зображення в форматі BGRA.
+
+    Returns:
+        ndarray: Зображення з прозорими чорними пікселями.
+    """
+    # Перевірте формат зображення
+    if img.shape[2] != 4:
+        raise ValueError("Зображення має бути в форматі BGRA")
+
+    # Знайдіть чорні пікселі
+    black_pixels = np.where((img[:, :, :3] == 0).all(axis=2))
+
+    # Замініть значення альфа чорних пікселів на 0
+    img[black_pixels[0], black_pixels[1], 3] = 0
+
+    return img
+
+def blend_transparent(face_img, overlay_t_img):
+    # Split out the transparency mask from the color info
+    overlay_img = overlay_t_img[:, :, :3]  # Grab the BGR planes
+    overlay_mask = overlay_t_img[:, :, 3]  # Alpha plane
+
+    # Convert overlay_img to BGRA if it's not already in that format
+    if overlay_img.shape[2] == 3:
+        overlay_img = cv2.cvtColor(overlay_img, cv2.COLOR_BGR2BGRA)
+
+    # Calculate the inverse mask
+    background_mask = 255 - overlay_mask
+
+    # Turn the masks into four channels for compatibility
+    overlay_mask = cv2.cvtColor(overlay_mask, cv2.COLOR_GRAY2BGRA)
+    background_mask = cv2.cvtColor(background_mask, cv2.COLOR_GRAY2BGRA)
+
+    # Create masked out face image and overlay
+    # Convert images to floating point in range 0.0 - 1.0
+    face_part = (face_img * (1 / 255.0)) * (background_mask * (1 / 255.0))
+    overlay_part = (overlay_img * (1 / 255.0)) * (overlay_mask * (1 / 255.0))
+
+    # Add them together and rescale back to an 8-bit integer image
+    return np.uint8(cv2.addWeighted(face_part, 255.0, overlay_part, 255.0, 0.0))
+
+def warp_images(img1, img2, M):
+    if img1 is None or img2 is None:
+        print("One or both images are not loaded correctly.")
+        return None
+
+    # Convert both images to BGRA format if they are not already
+    if img1.shape[2] != 4:
+        img1 = cv2.cvtColor(img1, cv2.COLOR_BGR2BGRA)
+    if img2.shape[2] != 4:
+        img2 = cv2.cvtColor(img2, cv2.COLOR_BGR2BGRA)
+
+        # Calculate max dimensions considering both images
+    height, width = img1.shape[:2]
+    corners = np.array([[0, 0], [0, height], [width, height], [width, 0]], dtype=np.float32)
+    transformed_corners = cv2.perspectiveTransform(np.array([corners]), M)
+    transformed_corners = transformed_corners.reshape(-1, 2)
+    max_height = max(max(transformed_corners[:, 1]), img2.shape[0])
+    max_width = max(max(transformed_corners[:, 0]), img2.shape[1])
+
+    # Resize both images consistently
+    enlarged_img1 = np.zeros((int(max_height), int(max_width), 4), dtype=np.uint8)
+    enlarged_img1[:img1.shape[0], :img1.shape[1]] = img1
+    enlarged_img2 = np.zeros((int(max_height), int(max_width), 4), dtype=np.uint8)
+    enlarged_img2[:img2.shape[0], :img2.shape[1]] = img2
+
+    enlarged_img1 = replace_black_with_transparent(enlarged_img1)
+    enlarged_img2 = replace_black_with_transparent(enlarged_img2)
+
+    # Apply perspective transformation and blend
+    warped_img2 = cv2.warpPerspective(enlarged_img2, M, (enlarged_img1.shape[1], enlarged_img1.shape[0]))
+    result = blend_transparent(enlarged_img1, warped_img2)
+
+    # Robust non-zero pixel search (adjust threshold if needed)
+    # non_zero_pixels = cv2.findNonZero(cv2.cvtColor(result, cv2.COLOR_BGRA2GRAY), threshold=1)
+    # x, y, w, h = cv2.boundingRect(non_zero_pixels)
+    # result = result[y:y+h, x:x+w]
+
+    result = replace_black_with_transparent(result)
+
+    return result
+
+def print_memory_info():
+    memory = psutil.virtual_memory()
+    print("Memory available is {:.2f}GB ({:.2f}%)".format(memory.available / (1024.0 ** 3), memory.available * 100 / memory.total))
 
 def save_image(directory, file_name, image):
     #     check directory is exist and create if not exit
     if not os.path.exists(directory):
         os.makedirs(directory)
     cv2.imwrite(directory+'\\'+file_name, image)
-
-def warp_images(img1, img2, h):
-    # Отримання розмірів зображень
-    rows1, cols1 = img1.shape[:2]
-    rows2, cols2 = img2.shape[:2]
-
-    # Визначення точок для перспективного перетворення
-    list_of_points_1 = np.array([[0, 0], [0, rows1], [cols1, rows1], [cols1, 0]], dtype=np.float32)
-    temp_points = np.array([[0, 0], [0, rows2], [cols2, rows2], [cols2, 0]], dtype=np.float32)
-
-    # Перетворення точок перспективного перетворення для другого зображення
-    list_of_points_2 = cv2.perspectiveTransform(temp_points.reshape(-1, 1, 2), h).reshape(-1, 2)
-
-    # Об'єднання точок зображень
-    list_of_points = np.vstack((list_of_points_1, list_of_points_2))
-
-    # Визначення меж об'єднаної області
-    min_x, min_y = np.int32(list_of_points.min(axis=0))
-    max_x, max_y = np.int32(list_of_points.max(axis=0))
-
-    # Визначення зсуву для першого зображення
-    translation_dist = [-min_x, -min_y]
-
-    # Розрахунок розміру вихідного зображення
-    output_width = max(max_x - min_x, cols1)
-    output_height = max(max_y - min_y, rows1)
-
-    # Матриця трансляції
-    h_translation = np.array([[1, 0, translation_dist[0]], [0, 1, translation_dist[1]], [0, 0, 1]])
-
-    # Виконання перспективного перетворення для другого зображення
-    output_img = cv2.warpPerspective(img2, np.dot(h_translation, h), (output_width, output_height))
-
-    # Копіювання першого зображення на вихідне зображення з урахуванням зсуву
-    output_img[translation_dist[1]:rows1 + translation_dist[1], translation_dist[0]:cols1 + translation_dist[0]] = img1
-
-    return output_img
-
-def print_memory_info():
-    memory = psutil.virtual_memory()
-    print("Memory available is {:.2f}GB ({:.2f}%)".format(memory.available / (1024.0 ** 3), memory.available * 100 / memory.total))
 
 def preprocess_image(image):
   # Перетворення на чорно-білий
@@ -254,8 +302,8 @@ def preprocess_image(image):
   # Гістограма вирівнювання: Цей метод покращує контрастність зображення, що може допомогти знайти більше деталей.
   gray_image = cv2.equalizeHist(gray_image)
  
-  kernel_size = (5, 5)
-  sigma = 1.0
+  kernel_size = (11, 11)
+  sigma = 2.0
   gray_image = cv2.GaussianBlur(gray_image, kernel_size, sigma)
 
   # cv2.imshow('оброблене фото', gray_image)
@@ -269,17 +317,6 @@ def first_step(img1, img2):
         return None
     # Create our ORB detector and detect keypoints and descriptors
     sift = cv2.SIFT_create(nfeatures=4000)
-
-    # img2 = match_contrast(img1, img2)
-
-    # TODO пофіксити цей момент, покищо так далі будем бачити
-    # Видалення чорного кольору
-    thresh = 254
-    black_mask = cv2.threshold(img1, thresh, 255, cv2.THRESH_BINARY_INV)[1]
-    img1 = cv2.bitwise_and(img1, black_mask)
-
-    black_mask = cv2.threshold(img2, thresh, 255, cv2.THRESH_BINARY_INV)[1]
-    img2 = cv2.bitwise_and(img2, black_mask)
 
     # Попередня обробка
     processed_img1 = preprocess_image(img1)
