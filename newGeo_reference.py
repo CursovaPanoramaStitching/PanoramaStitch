@@ -1,103 +1,122 @@
 import cv2
 import numpy as np
-from scipy.interpolate import CubicSpline, interp1d
-
-# Вхідна панорама
-panorama = cv2.imread('result\\final_image_stitched.jpg')
-
+import rasterio
+from rasterio.plot import show
+####################################################################################################
+#Створення tiff файлу на основі 5 точок
 # Контрольні точки (гео + пікселі)
+img_path = 'result\\final_image_stitched.jpg'
+img = cv2.imread(img_path)
+outputPath = 'result\\georefRaster.tif'
+
 points = np.array([[48.54334883179478, 35.0948654426536, 6641, 9270],
                    [48.542041777503826, 35.09759793192003, 8518, 7017],
                    [48.54071025778341, 35.09941698099394, 10415, 5526],
                    [48.53931743764255, 35.10125316177766, 12402, 4040],
                    [48.54097494166265, 35.10354552977222, 10335, 1848]])
 
-# Інтерполяція
-num_interpolated_points = 20  # Кількість інтерпольованих точок між контрольними точками
-interpolated_points = []
-# перший варіант інтерполяції точок
-####################################################################################################
-# for i in range(len(points) - 1):
-#     start_geo = points[i][:2]
-#     end_geo = points[i + 1][:2]
-#     start_pixel = points[i][2:]
-#     end_pixel = points[i + 1][2:]
-#
-#     # Лінійна інтерполяція між контрольними точками
-#     for j in range(num_interpolated_points):
-#         ratio = j / num_interpolated_points
-#         interpolated_geo = start_geo + (end_geo - start_geo) * ratio
-#         interpolated_pixel = start_pixel + (end_pixel - start_pixel) * ratio
-#         interpolated_points.append(np.concatenate((interpolated_geo, interpolated_pixel)))
-# print(interpolated_points)
-#
-# # Проходимо по інтерпольованим точкам
-# for point in interpolated_points:
-#     x, y = point[2:]
-#     pt = (int(x), int(y))
-#     cv2.drawMarker(panorama, pt, (255, 0, 0), cv2.MARKER_CROSS, 50, thickness=5)
-#
-# # Збереження результату
-# cv2.imwrite('result\\result_panorama.jpg', panorama)
+#open un_geo_referenced raster
+unRefRaster = rasterio.open(img_path)
 
-########################################################################################################
-    # другий варіант інтерполяції точок
-interpolated_geo_points = []
-for i in range(len(points) - 1):
-    # Відповідність гео- та піксельних координат
-    geo_coords = points[i:i+2, :2]
-    pixel_coords = points[i:i+2, 2:]
+# Створення списку контрольних точок
+gcps = []
+for point in points:
+    x_of_geo, y_of_geo, x_of_pixel, y_of_pixel  = point
+    gcps.append(rasterio.control.GroundControlPoint(row=y_of_pixel, col=x_of_pixel, x=y_of_geo, y=x_of_geo))
 
-    # Інтерполяція
-    x_of_pixel, y_of_pixel = pixel_coords[:, 0], pixel_coords[:, 1]
-    x_of_geo, y_of_geo = geo_coords[:, 0], geo_coords[:, 1]
+transformation = rasterio.transform.from_gcps(gcps)
 
-    y_linear = interp1d(x_of_pixel, y_of_pixel)
-    y_linear_geo = interp1d(x_of_geo, y_of_geo)
+#create raster and write bands
+with rasterio.open(
+        outputPath,
+        'w',
+        driver='GTiff',
+        height=unRefRaster.read(1).shape[0],
+        width=unRefRaster.read(1).shape[1],
+        count=3,
+        dtype=unRefRaster.read(1).dtype,
+        crs=rasterio.crs.CRS.from_epsg(4326),
+        transform=transformation,
+) as dst:
+    dst.write(unRefRaster.read(1), 1)
+    dst.write(unRefRaster.read(2), 2)
+    dst.write(unRefRaster.read(3), 3)
 
-    # Отримуємо інтерпольовані значення
-    x_interp = np.linspace(np.min(x_of_pixel), np.max(x_of_pixel), num_interpolated_points)
-    x_interp_geo = np.linspace(np.min(x_of_geo), np.max(x_of_geo), num_interpolated_points)
 
-    y_interp = y_linear(x_interp)
-    y_interp_geo = y_linear_geo(x_interp_geo)
+#show georeferenced raster
+geoRaster = rasterio.open(outputPath)
+show(geoRaster)
 
-    # Збираємо координати точок
-    interpolated_points.extend(np.column_stack((x_interp, y_interp)))
-    interpolated_geo_points.extend(np.column_stack((x_interp_geo, y_interp_geo)))
+###################################################################################################################
+# створення додаткових контрольних точок та визначення їх гео координат
+# Create our ORB detector and detect keypoints and descriptors
+orb = cv2.ORB_create(nfeatures=30)
+keypoints = orb.detect(img, None)
 
-# Проходимо по інтерпольованим точкам
-for point in interpolated_points:
+# Отримання піксельних координат для кожної ключової точки
+geo_coordinates = []
+pixel_coordinates = [(int(kp.pt[0]), int(kp.pt[1])) for kp in keypoints]
+
+# Відкриття TIFF файлу
+with rasterio.open(outputPath) as src:
+    # Доступ до даних та метаданих
+    data = src.read()
+    profile = src.profile
+
+    # Приклад використання
+    for pixel in pixel_coordinates:
+        geo_lon, geo_lat = src.xy(pixel[1], pixel[0])
+        geo_coordinates.append((geo_lat, geo_lon))
+
+for i in range(len(pixel_coordinates)):
+    print(f'pixel {pixel_coordinates[i][0]} {pixel_coordinates[i][1]} --> geo {geo_coordinates[i][0]} {geo_coordinates[i][1]}')
+
+for point in pixel_coordinates:
     x, y = point
     pt = (int(x), int(y))
-    cv2.drawMarker(panorama, pt, (255, 0, 0), cv2.MARKER_CROSS, 50, thickness=5)
+    cv2.drawMarker(img, pt, (255, 0, 0), cv2.MARKER_CROSS, 50, thickness=5)
 
 # Збереження результату
-cv2.imwrite('result\\result_panorama.jpg', panorama)
-#####################################################################################################################
-# example of defining geo data of new points
-
-# # Convert lists to NumPy arrays
-# interpolated_points = np.array(interpolated_points)
-# interpolated_geo_points = np.array(interpolated_geo_points)
-# # Function to determine geographical coordinates based on pixel coordinates
-# def get_geo_coordinates(pixel_coordinates):
-#     # Split known points into separate coordinate arrays
-#     x_known = interpolated_points[:, 0]
-#     y_known = interpolated_points[:, 1]
-#     lat_known = interpolated_geo_points[:, 0]
-#     lon_known = interpolated_geo_points[:, 1]
-#
-#     # Perform linear interpolation to determine geographical coordinates
-#     lat_interpolated = interp1d(x_known, lat_known, kind='linear', fill_value='extrapolate')(pixel_coordinates[0])
-#     lon_interpolated = interp1d(y_known, lon_known, kind='linear', fill_value='extrapolate')(pixel_coordinates[1])
-#
-#     return lat_interpolated, lon_interpolated
-#
-# # Example usage:
-# pixel_coords = (11009, 8772)  # Pixel coordinates of the point to be determined
-# lat, lon = get_geo_coordinates(pixel_coords)
-# print("Geographical coordinates of the point:", lat, lon)
+cv2.imwrite('result\\result_panorama.jpg', img)
 
 
 
+# Додавання географічних та піксельних координат до масиву points
+for i in range(len(geo_coordinates)):
+    geo = geo_coordinates[i]
+    pixel = pixel_coordinates[i]
+    new_row = np.array([geo[0], geo[1], pixel[0], pixel[1]])
+    points = np.vstack([points, new_row])
+
+print(f'points : {points}')
+#open un_geo_referenced raster
+unRefRaster = rasterio.open(img_path)
+
+# Створення списку контрольних точок
+gcps = []
+for point in points:
+    x_of_geo, y_of_geo, x_of_pixel, y_of_pixel  = point
+    gcps.append(rasterio.control.GroundControlPoint(row=y_of_pixel, col=x_of_pixel, x=y_of_geo, y=x_of_geo))
+
+transformation = rasterio.transform.from_gcps(gcps)
+
+#create raster and write bands
+with rasterio.open(
+        outputPath,
+        'w',
+        driver='GTiff',
+        height=unRefRaster.read(1).shape[0],
+        width=unRefRaster.read(1).shape[1],
+        count=3,
+        dtype=unRefRaster.read(1).dtype,
+        crs=rasterio.crs.CRS.from_epsg(4326),
+        transform=transformation,
+) as dst:
+    dst.write(unRefRaster.read(1), 1)
+    dst.write(unRefRaster.read(2), 2)
+    dst.write(unRefRaster.read(3), 3)
+
+
+#show georeferenced raster
+geoRaster = rasterio.open(outputPath)
+show(geoRaster)
