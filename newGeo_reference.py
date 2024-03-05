@@ -8,6 +8,7 @@ from rasterio.plot import show
 img_path = 'result\\final_image_stitched.jpg'
 img = cv2.imread(img_path)
 outputPath = 'result\\georefRaster.tif'
+new_outputPath = 'result\\new_georefRaster.tif'
 
 points = np.array([[48.54334883179478, 35.0948654426536, 6641, 9270],
                    [48.542041777503826, 35.09759793192003, 8518, 7017],
@@ -41,11 +42,6 @@ with rasterio.open(
     dst.write(unRefRaster.read(1), 1)
     dst.write(unRefRaster.read(2), 2)
     dst.write(unRefRaster.read(3), 3)
-
-
-#show georeferenced raster
-geoRaster = rasterio.open(outputPath)
-show(geoRaster)
 
 ###################################################################################################################
 # створення додаткових контрольних точок та визначення їх гео координат
@@ -102,7 +98,7 @@ transformation = rasterio.transform.from_gcps(gcps)
 
 #create raster and write bands
 with rasterio.open(
-        outputPath,
+        new_outputPath,
         'w',
         driver='GTiff',
         height=unRefRaster.read(1).shape[0],
@@ -116,7 +112,7 @@ with rasterio.open(
     dst.write(unRefRaster.read(2), 2)
     dst.write(unRefRaster.read(3), 3)
 
-
-#show georeferenced raster
-geoRaster = rasterio.open(outputPath)
-show(geoRaster)
+with rasterio.open(new_outputPath) as src:
+    geo_lon, geo_lat = src.xy(8619, 9484)
+    print("test")
+    print(f'pixel 9484, 8619 --> geo {geo_lat} {geo_lon}')
